@@ -26,12 +26,15 @@ HONCHO_DIR="${HONCHO_HOME:-$HOME/honcho}"
 DATA_DIR="${HONCHO_DIR}/.honcho-local"
 PID_DIR="${DATA_DIR}/pids"
 LOG_DIR="${DATA_DIR}/logs"
-PG_PORT="${HONCHO_PG_PORT:-5432}"
-REDIS_PORT="${HONCHO_REDIS_PORT:-6379}"
+PG_PORT="${HONCHO_PG_PORT:-5433}"
+REDIS_PORT="${HONCHO_REDIS_PORT:-6380}"
 API_PORT="${HONCHO_API_PORT:-8000}"
 PG_CONTAINER="honcho-postgres"
 REDIS_CONTAINER="honcho-redis"
 PG_VOLUME="honcho-pgdata"
+
+# Use local Docker socket, not whatever DOCKER_HOST points to (e.g. Minikube)
+export DOCKER_HOST="unix:///var/run/docker.sock"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
