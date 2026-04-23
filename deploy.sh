@@ -88,6 +88,42 @@ ensure_deps() {
   ok "Dependencies installed."
 }
 
+# Apply patches for known upstream bugs that haven't been fixed yet.
+# Each patch is idempotent — safe to re-run on every `up`.
+apply_patches() {
+  local backend="${HONCHO_DIR}/src/llm/backends/anthropic.py"
+
+  # Patch: Anthropic rejects stop sequences that are purely whitespace (e.g. "   \n"
+  # passed by the deriver). Filter them out before the API call.
+  # Upstream issue: deriver.py line ~130 passes ["   \n", "\n\n\n\n"] as stop_sequences.
+  local sentinel="valid_stop = [s for s in stop if s.strip()]"
+  if grep -qF "$sentinel" "$backend" 2>/dev/null; then
+    ok "Patch (whitespace stop_sequences) already applied."
+  else
+    info "Applying patch: filter whitespace stop_sequences for Anthropic backend..."
+    python3 -c "
+import sys
+path = sys.argv[1]
+content = open(path).read()
+old = '        if stop:\n            params[\"stop_sequences\"] = stop'
+new = (
+    '        if stop:\n'
+    '            # AIDEV-NOTE: Anthropic rejects purely-whitespace stop sequences\n'
+    '            # (e.g. \"   \\\\n\" from the deriver). Patched by deploy.sh.\n'
+    '            valid_stop = [s for s in stop if s.strip()]\n'
+    '            if valid_stop:\n'
+    '                params[\"stop_sequences\"] = valid_stop'
+)
+patched = content.replace(old, new)
+if patched == content:
+    print('WARNING: patch target not found in ' + path + ' — Honcho may have changed upstream')
+    sys.exit(1)
+open(path, 'w').write(patched)
+" "$backend"
+    ok "Patch (whitespace stop_sequences) applied."
+  fi
+}
+
 ensure_env() {
   local env_file="${HONCHO_DIR}/.env"
   if [[ -f "$env_file" ]]; then
@@ -105,16 +141,32 @@ ensure_env() {
     [[ -z "$anthropic_key" ]] && err "Anthropic key is required."
   fi
 
-  local gemini_key="${LLM_GEMINI_API_KEY:-}" groq_key="${LLM_GROQ_API_KEY:-}" openai_key="${LLM_OPENAI_API_KEY:-}"
-  read -rsp "$(echo -e "${YELLOW}Gemini API Key    ${DIM}(Enter to skip):${NC} ")" gemini_key
-  echo
-  read -rsp "$(echo -e "${YELLOW}Groq API Key      ${DIM}(Enter to skip):${NC} ")" groq_key
-  echo
-  read -rsp "$(echo -e "${YELLOW}OpenAI API Key    ${DIM}(Enter to skip):${NC} ")" openai_key
-  echo
+  local gemini_key="${LLM_GEMINI_API_KEY-__unset__}"
+  local groq_key="${LLM_GROQ_API_KEY-__unset__}"
+  local openai_key="${LLM_OPENAI_API_KEY-__unset__}"
+
+  if [[ "$gemini_key" == "__unset__" ]]; then
+    read -rsp "$(echo -e "${YELLOW}Gemini API Key    ${DIM}(Enter to skip):${NC} ")" gemini_key; echo
+  else
+    info "Gemini API Key    — using env var."
+    [[ "$gemini_key" == "__unset__" ]] && gemini_key=""
+  fi
+  if [[ "$groq_key" == "__unset__" ]]; then
+    read -rsp "$(echo -e "${YELLOW}Groq API Key      ${DIM}(Enter to skip):${NC} ")" groq_key; echo
+  else
+    info "Groq API Key      — using env var."
+    [[ "$groq_key" == "__unset__" ]] && groq_key=""
+  fi
+  if [[ "$openai_key" == "__unset__" ]]; then
+    read -rsp "$(echo -e "${YELLOW}OpenAI API Key    ${DIM}(Enter to skip):${NC} ")" openai_key; echo
+  else
+    info "OpenAI API Key    — using env var."
+    [[ "$openai_key" == "__unset__" ]] && openai_key=""
+  fi
 
   cat >"$env_file" <<EOF
 DB_CONNECTION_URI=postgresql+psycopg://honcho:honcho@localhost:${PG_PORT}/honcho
+CACHE_URL=redis://localhost:${REDIS_PORT}/0
 LLM_ANTHROPIC_API_KEY=${anthropic_key}
 LLM_GEMINI_API_KEY=${gemini_key}
 LLM_GROQ_API_KEY=${groq_key}
@@ -122,6 +174,51 @@ LLM_OPENAI_API_KEY=${openai_key}
 AUTH_USE_AUTH=false
 SENTRY_ENABLED=false
 LOG_LEVEL=info
+
+# --- Model provider configuration ---
+# NOTE: Honcho uses MODEL_CONFIG__TRANSPORT / MODEL_CONFIG__MODEL (pydantic-settings
+# nested syntax). *_PROVIDER and *_MODEL vars are NOT recognized and will be ignored.
+SUMMARY_MODEL_CONFIG__TRANSPORT=anthropic
+SUMMARY_MODEL_CONFIG__MODEL=claude-haiku-4-5
+
+DERIVER_MODEL_CONFIG__TRANSPORT=anthropic
+DERIVER_MODEL_CONFIG__MODEL=claude-haiku-4-5
+# Process messages immediately without waiting for 1024-token batch threshold.
+# Essential for local dev — without this, short conversations are never derived.
+DERIVER_FLUSH_ENABLED=true
+
+DREAM_MODEL_CONFIG__TRANSPORT=anthropic
+DREAM_MODEL_CONFIG__MODEL=claude-sonnet-4-20250514
+
+# --- Dialectic levels (all using Anthropic) ---
+# All levels must be specified together when overriding the defaults.
+DIALECTIC__LEVELS__minimal__PROVIDER=anthropic
+DIALECTIC__LEVELS__minimal__MODEL=claude-haiku-4-5
+DIALECTIC__LEVELS__minimal__THINKING_BUDGET_TOKENS=0
+DIALECTIC__LEVELS__minimal__MAX_TOOL_ITERATIONS=1
+DIALECTIC__LEVELS__minimal__MAX_OUTPUT_TOKENS=250
+DIALECTIC__LEVELS__minimal__TOOL_CHOICE=any
+
+DIALECTIC__LEVELS__low__PROVIDER=anthropic
+DIALECTIC__LEVELS__low__MODEL=claude-haiku-4-5
+DIALECTIC__LEVELS__low__THINKING_BUDGET_TOKENS=0
+DIALECTIC__LEVELS__low__MAX_TOOL_ITERATIONS=5
+DIALECTIC__LEVELS__low__TOOL_CHOICE=any
+
+DIALECTIC__LEVELS__medium__PROVIDER=anthropic
+DIALECTIC__LEVELS__medium__MODEL=claude-haiku-4-5
+DIALECTIC__LEVELS__medium__THINKING_BUDGET_TOKENS=1024
+DIALECTIC__LEVELS__medium__MAX_TOOL_ITERATIONS=2
+
+DIALECTIC__LEVELS__high__PROVIDER=anthropic
+DIALECTIC__LEVELS__high__MODEL=claude-haiku-4-5
+DIALECTIC__LEVELS__high__THINKING_BUDGET_TOKENS=1024
+DIALECTIC__LEVELS__high__MAX_TOOL_ITERATIONS=4
+
+DIALECTIC__LEVELS__max__PROVIDER=anthropic
+DIALECTIC__LEVELS__max__MODEL=claude-haiku-4-5
+DIALECTIC__LEVELS__max__THINKING_BUDGET_TOKENS=2048
+DIALECTIC__LEVELS__max__MAX_TOOL_ITERATIONS=10
 EOF
   ok ".env created."
 }
@@ -145,6 +242,7 @@ cmd_up() {
   check_deps
   ensure_repo
   ensure_deps
+  apply_patches
   ensure_env
   mkdir -p "${PID_DIR}" "${LOG_DIR}"
   cd "${HONCHO_DIR}"
