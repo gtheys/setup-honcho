@@ -10,8 +10,8 @@ The script handles everything: cloning the Honcho source, installing Python depe
 
 | Component | How it runs | Default port |
 |---|---|---|
-| PostgreSQL 15 + pgvector | Docker container | `5432` |
-| Redis 8 | Docker container | `6379` |
+| PostgreSQL 15 + pgvector | Docker container | `5433` |
+| Redis 8 | Docker container | `6380` |
 | Honcho API (FastAPI) | Native process via `uv` | `8000` |
 | Deriver worker | Native process via `uv` | — |
 
@@ -21,10 +21,11 @@ Database data persists in a Docker named volume (`honcho-pgdata`) across restart
 
 ## Prerequisites
 
-You need two things installed before running the script:
+You need the following installed before running the script:
 
 - **Docker** — used to run PostgreSQL and Redis
 - **Git** — used to clone the Honcho source repository
+- **1Password CLI (`op`)** — used to inject API keys at runtime (see [API keys](#api-keys) below)
 
 `uv` (the Python package manager) is required but the script installs it automatically if it is not found.
 
@@ -33,6 +34,8 @@ You need two things installed before running the script:
 ```bash
 sudo pacman -S docker git
 sudo systemctl enable --now docker
+# Install 1Password CLI:
+yay -S 1password-cli
 ```
 
 ### Installing prerequisites on Ubuntu / Debian
@@ -41,12 +44,13 @@ sudo systemctl enable --now docker
 sudo apt update && sudo apt install -y docker.io git
 sudo systemctl enable --now docker
 sudo usermod -aG docker $USER   # log out and back in after this
+# Install 1Password CLI: https://developer.1password.com/docs/cli/get-started
 ```
 
 ### Installing prerequisites on macOS
 
 ```bash
-brew install git
+brew install git 1password-cli
 # Install Docker Desktop from https://www.docker.com/products/docker-desktop
 ```
 
@@ -77,21 +81,70 @@ chmod +x deploy.sh
 
 ---
 
+## API keys
+
+API keys are stored in **1Password** and never written as plaintext to disk. The script uses the [1Password CLI](https://developer.1password.com/docs/cli) to resolve them at startup.
+
+### Step 1 — Store keys in 1Password
+
+Create a single item called **`Honcho`** in your **Personal** vault with the following fields:
+
+| Field name | Value |
+|---|---|
+| `anthropic_key` | Your Anthropic API key (`sk-ant-...`) |
+| `openai_key` | Your OpenAI API key (`sk-proj-...`) — optional, used for embeddings |
+
+You can create it via the CLI:
+
+```bash
+op item create \
+  --vault Personal \
+  --category "API Credential" \
+  --title "Honcho" \
+  "anthropic_key[password]=sk-ant-..." \
+  "openai_key[password]=sk-proj-..."
+```
+
+Or create it manually in the 1Password app with those exact field names.
+
+### Step 2 — Make sure the 1Password app is running
+
+The `op` CLI connects to the 1Password desktop app. Make sure it is open and unlocked before running `./deploy.sh up`.
+
+### How it works
+
+The `.env` file in `~/honcho/` stores `op://` references instead of plaintext keys:
+
+```
+LLM_ANTHROPIC_API_KEY=op://Personal/Honcho/anthropic_key
+LLM_OPENAI_API_KEY=op://Personal/Honcho/openai_key
+```
+
+When you run `./deploy.sh up`, the script calls `op inject` to resolve these references into actual values and writes them into `.env` before starting the API and Deriver. When you run `./deploy.sh down`, the plaintext values are replaced back with `op://` references — so **keys are never left on disk at rest**.
+
+| State | `.env` contains |
+|---|---|
+| Stopped (`down`) | `op://` references — no plaintext keys |
+| Running (`up`) | Resolved plaintext keys (in memory / on disk only while running) |
+
+---
+
 ## Quick start
 
 ```bash
 ./deploy.sh up
 ```
 
-That's it. On the first run the script will:
+On the first run the script will:
 
-1. Check that `docker` and `git` are available (and install `uv` if missing)
+1. Check that `docker`, `git`, and `op` are available (and install `uv` if missing)
 2. Clone the Honcho repository into `~/honcho`
 3. Install all Python dependencies
-4. Prompt you for your LLM API keys and write a `.env` file
-5. Start PostgreSQL and Redis containers
-6. Run Alembic database migrations
-7. Start the Honcho API server and Deriver worker in the background
+4. Write a `.env` file with `op://` key references
+5. Resolve secrets from 1Password via `op inject`
+6. Start PostgreSQL and Redis containers
+7. Run Alembic database migrations
+8. Start the Honcho API server and Deriver worker in the background
 
 When everything is up you will see:
 
@@ -102,33 +155,11 @@ When everything is up you will see:
 
   API:       http://localhost:8000
   Docs:      http://localhost:8000/docs
-  Postgres:  localhost:5432  (volume: honcho-pgdata)
-  Redis:     localhost:6379
+  Postgres:  localhost:5433  (volume: honcho-pgdata)
+  Redis:     localhost:6380
 ```
 
 Open `http://localhost:8000/docs` in your browser to explore the interactive API documentation.
-
----
-
-## API keys
-
-On the first run the script will ask for your API keys interactively. Only the Anthropic key is required — the others can be left blank by pressing Enter.
-
-| Key | Required | Used for |
-|---|---|---|
-| `LLM_ANTHROPIC_API_KEY` | **Yes** | Core LLM reasoning in the Deriver |
-| `LLM_GEMINI_API_KEY` | No | Alternative LLM provider |
-| `LLM_GROQ_API_KEY` | No | Alternative LLM provider |
-| `LLM_OPENAI_API_KEY` | No | Alternative LLM provider |
-
-The keys are written once to `~/honcho/.env` and reused on subsequent `up` calls. To update them, edit that file directly or delete it and run `./deploy.sh up` again.
-
-You can also pre-supply keys via environment variables to skip the prompts:
-
-```bash
-export LLM_ANTHROPIC_API_KEY=sk-ant-...
-./deploy.sh up
-```
 
 ---
 
@@ -157,7 +188,7 @@ Idempotent: components that are already running are detected and skipped. Safe t
 ./deploy.sh down
 ```
 
-Kills the API and Deriver processes and stops the Docker containers. The PostgreSQL data volume is left intact so your data survives.
+Kills the API and Deriver processes and stops the Docker containers. The PostgreSQL data volume is left intact so your data survives. The `.env` file is restored to `op://` references — no plaintext keys remain on disk.
 
 ### `status` — inspect what's running
 
@@ -170,8 +201,8 @@ Example output:
 ```
   Service          Status
   ───────────────  ─────────────
-  PostgreSQL       running  :5432  vol=honcho-pgdata
-  Redis            running  :6379
+  PostgreSQL       running  :5433  vol=honcho-pgdata
+  Redis            running  :6380
   Honcho API       running  :8000  PID=12345
   Deriver          running  PID=12346
 ```
@@ -209,14 +240,14 @@ All configuration is done via environment variables. Set them in your shell befo
 | Variable | Default | Description |
 |---|---|---|
 | `HONCHO_HOME` | `~/honcho` | Directory where the Honcho repo is cloned |
-| `HONCHO_PG_PORT` | `5432` | Host port mapped to PostgreSQL |
-| `HONCHO_REDIS_PORT` | `6379` | Host port mapped to Redis |
+| `HONCHO_PG_PORT` | `5433` | Host port mapped to PostgreSQL |
+| `HONCHO_REDIS_PORT` | `6380` | Host port mapped to Redis |
 | `HONCHO_API_PORT` | `8000` | Host port the Honcho API listens on |
 
 Example — run everything on non-default ports:
 
 ```bash
-HONCHO_PG_PORT=5433 HONCHO_API_PORT=9000 ./deploy.sh up
+HONCHO_PG_PORT=5434 HONCHO_API_PORT=9000 ./deploy.sh up
 ```
 
 ---
@@ -225,7 +256,7 @@ HONCHO_PG_PORT=5433 HONCHO_API_PORT=9000 ./deploy.sh up
 
 ```
 ~/honcho/                        ← HONCHO_HOME (cloned Honcho source)
-├── .env                         ← your API keys and config (created on first run)
+├── .env                         ← op:// references at rest, resolved keys while running
 ├── .honcho-local/
 │   ├── pids/
 │   │   ├── api.pid              ← PID of the running API process
@@ -250,7 +281,7 @@ Docker resources:
 
 | Action | Database data | `.env` / API keys | Honcho source |
 |---|---|---|---|
-| `down` | **Preserved** | Preserved | Preserved |
+| `down` | **Preserved** | Preserved (`op://` refs restored) | Preserved |
 | Reboot | **Preserved** | Preserved | Preserved |
 | `nuke` | **Deleted** | Preserved | Preserved |
 
@@ -301,6 +332,16 @@ sudo usermod -aG docker $USER
 
 Log out and back in for the group change to take effect, then re-run.
 
+### `Failed to resolve secrets from 1Password`
+
+```
+[✗] Failed to resolve secrets from 1Password. Is the app running and unlocked?
+```
+
+Make sure the 1Password desktop app is open and unlocked, then re-run. The `op` CLI requires the app to be running to authenticate.
+
+If the `Honcho` item doesn't exist yet, create it — see [API keys](#api-keys) above.
+
 ### Port already in use
 
 If a service fails to start because the port is taken, run a different port:
@@ -315,12 +356,18 @@ Or find and stop whatever is using the port:
 ss -tlnp | grep 8000
 ```
 
-### API key prompt is skipped but `.env` is wrong
+### `.env` has wrong or missing keys
 
-The script only creates `.env` once. If the file already exists it is reused without prompting. To re-enter your keys, delete the file and re-run:
+If you need to update the API keys stored in 1Password:
 
 ```bash
-rm ~/honcho/.env
+op item edit Honcho --vault Personal anthropic_key=sk-ant-...
+```
+
+Then restart:
+
+```bash
+./deploy.sh down
 ./deploy.sh up
 ```
 
