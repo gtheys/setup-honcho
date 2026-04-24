@@ -55,10 +55,10 @@ err() {
 # =============================================================================
 check_deps() {
   local missing=()
-  for cmd in docker git; do
+  for cmd in docker git op; do
     command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
   done
-  [[ ${#missing[@]} -gt 0 ]] && err "Missing: ${missing[*]}. Install with: sudo pacman -S ${missing[*]}"
+  [[ ${#missing[@]} -gt 0 ]] && err "Missing: ${missing[*]}. Install op from: https://developer.1password.com/docs/cli"
 
   docker info >/dev/null 2>&1 || err "Docker daemon not running. Start it: sudo systemctl start docker"
 
@@ -131,46 +131,17 @@ ensure_env() {
     return
   fi
 
-  info "Creating .env — need your API keys."
-  echo ""
-
-  local anthropic_key="${LLM_ANTHROPIC_API_KEY:-}"
-  if [[ -z "$anthropic_key" ]]; then
-    read -rsp "$(echo -e "${YELLOW}Anthropic API Key (required):${NC} ")" anthropic_key
-    echo
-    [[ -z "$anthropic_key" ]] && err "Anthropic key is required."
-  fi
-
-  local gemini_key="${LLM_GEMINI_API_KEY-__unset__}"
-  local groq_key="${LLM_GROQ_API_KEY-__unset__}"
-  local openai_key="${LLM_OPENAI_API_KEY-__unset__}"
-
-  if [[ "$gemini_key" == "__unset__" ]]; then
-    read -rsp "$(echo -e "${YELLOW}Gemini API Key    ${DIM}(Enter to skip):${NC} ")" gemini_key; echo
-  else
-    info "Gemini API Key    — using env var."
-    [[ "$gemini_key" == "__unset__" ]] && gemini_key=""
-  fi
-  if [[ "$groq_key" == "__unset__" ]]; then
-    read -rsp "$(echo -e "${YELLOW}Groq API Key      ${DIM}(Enter to skip):${NC} ")" groq_key; echo
-  else
-    info "Groq API Key      — using env var."
-    [[ "$groq_key" == "__unset__" ]] && groq_key=""
-  fi
-  if [[ "$openai_key" == "__unset__" ]]; then
-    read -rsp "$(echo -e "${YELLOW}OpenAI API Key    ${DIM}(Enter to skip):${NC} ")" openai_key; echo
-  else
-    info "OpenAI API Key    — using env var."
-    [[ "$openai_key" == "__unset__" ]] && openai_key=""
-  fi
+  # AIDEV-NOTE: API keys are stored in 1Password under "Honcho" (Personal vault).
+  # op run resolves op:// references at process start — no plaintext keys on disk.
+  command -v op >/dev/null 2>&1 || err "1Password CLI (op) not found. Install it: https://developer.1password.com/docs/cli"
 
   cat >"$env_file" <<EOF
 DB_CONNECTION_URI=postgresql+psycopg://honcho:honcho@localhost:${PG_PORT}/honcho
 CACHE_URL=redis://localhost:${REDIS_PORT}/0
-LLM_ANTHROPIC_API_KEY=${anthropic_key}
-LLM_GEMINI_API_KEY=${gemini_key}
-LLM_GROQ_API_KEY=${groq_key}
-LLM_OPENAI_API_KEY=${openai_key}
+LLM_ANTHROPIC_API_KEY=op://Personal/Honcho/anthropic_key
+LLM_GEMINI_API_KEY=
+LLM_GROQ_API_KEY=
+LLM_OPENAI_API_KEY=op://Personal/Honcho/openai_key
 AUTH_USE_AUTH=false
 SENTRY_ENABLED=false
 LOG_LEVEL=info
@@ -192,35 +163,54 @@ DREAM_MODEL_CONFIG__MODEL=claude-sonnet-4-20250514
 
 # --- Dialectic levels (all using Anthropic) ---
 # All levels must be specified together when overriding the defaults.
-DIALECTIC__LEVELS__minimal__PROVIDER=anthropic
-DIALECTIC__LEVELS__minimal__MODEL=claude-haiku-4-5
+# AIDEV-NOTE: Use MODEL_CONFIG__TRANSPORT / MODEL_CONFIG__MODEL — NOT __PROVIDER/__MODEL
+DIALECTIC__LEVELS__minimal__MODEL_CONFIG__TRANSPORT=anthropic
+DIALECTIC__LEVELS__minimal__MODEL_CONFIG__MODEL=claude-haiku-4-5
 DIALECTIC__LEVELS__minimal__THINKING_BUDGET_TOKENS=0
 DIALECTIC__LEVELS__minimal__MAX_TOOL_ITERATIONS=1
 DIALECTIC__LEVELS__minimal__MAX_OUTPUT_TOKENS=250
 DIALECTIC__LEVELS__minimal__TOOL_CHOICE=any
 
-DIALECTIC__LEVELS__low__PROVIDER=anthropic
-DIALECTIC__LEVELS__low__MODEL=claude-haiku-4-5
+DIALECTIC__LEVELS__low__MODEL_CONFIG__TRANSPORT=anthropic
+DIALECTIC__LEVELS__low__MODEL_CONFIG__MODEL=claude-haiku-4-5
 DIALECTIC__LEVELS__low__THINKING_BUDGET_TOKENS=0
 DIALECTIC__LEVELS__low__MAX_TOOL_ITERATIONS=5
 DIALECTIC__LEVELS__low__TOOL_CHOICE=any
 
-DIALECTIC__LEVELS__medium__PROVIDER=anthropic
-DIALECTIC__LEVELS__medium__MODEL=claude-haiku-4-5
+DIALECTIC__LEVELS__medium__MODEL_CONFIG__TRANSPORT=anthropic
+DIALECTIC__LEVELS__medium__MODEL_CONFIG__MODEL=claude-haiku-4-5
 DIALECTIC__LEVELS__medium__THINKING_BUDGET_TOKENS=1024
 DIALECTIC__LEVELS__medium__MAX_TOOL_ITERATIONS=2
 
-DIALECTIC__LEVELS__high__PROVIDER=anthropic
-DIALECTIC__LEVELS__high__MODEL=claude-haiku-4-5
+DIALECTIC__LEVELS__high__MODEL_CONFIG__TRANSPORT=anthropic
+DIALECTIC__LEVELS__high__MODEL_CONFIG__MODEL=claude-haiku-4-5
 DIALECTIC__LEVELS__high__THINKING_BUDGET_TOKENS=1024
 DIALECTIC__LEVELS__high__MAX_TOOL_ITERATIONS=4
 
-DIALECTIC__LEVELS__max__PROVIDER=anthropic
-DIALECTIC__LEVELS__max__MODEL=claude-haiku-4-5
+DIALECTIC__LEVELS__max__MODEL_CONFIG__TRANSPORT=anthropic
+DIALECTIC__LEVELS__max__MODEL_CONFIG__MODEL=claude-haiku-4-5
 DIALECTIC__LEVELS__max__THINKING_BUDGET_TOKENS=2048
 DIALECTIC__LEVELS__max__MAX_TOOL_ITERATIONS=10
 EOF
-  ok ".env created."
+  ok ".env created (API keys referenced via 1Password)."
+}
+
+# AIDEV-NOTE: Honcho uses load_dotenv(override=True) internally, which means it reads
+# the .env file directly and overrides any env vars already set by op run.
+# To work around this, we resolve op:// references at startup and write a
+# temporary .env.resolved file with plaintext keys. This file is deleted on `down`.
+resolve_secrets() {
+  local env_file="${HONCHO_DIR}/.env"
+  local resolved_file="${HONCHO_DIR}/.env.resolved"
+
+  info "Resolving secrets from 1Password..."
+  op inject --in-file="${env_file}" --out-file="${resolved_file}" \
+    || err "Failed to resolve secrets from 1Password. Is the app running and unlocked?"
+
+  # Replace the .env symlink/file so load_dotenv picks up resolved values
+  cp "${resolved_file}" "${env_file}"
+  rm -f "${resolved_file}"
+  ok "Secrets resolved into .env."
 }
 
 pid_alive() {
@@ -244,6 +234,7 @@ cmd_up() {
   ensure_deps
   apply_patches
   ensure_env
+  resolve_secrets
   mkdir -p "${PID_DIR}" "${LOG_DIR}"
   cd "${HONCHO_DIR}"
 
@@ -349,6 +340,15 @@ cmd_down() {
       docker stop "${ctr}" >/dev/null && ok "Stopped ${ctr}."
     fi
   done
+
+  # AIDEV-NOTE: Restore op:// references so plaintext keys don't sit on disk at rest
+  local env_file="${HONCHO_DIR}/.env"
+  if [[ -f "$env_file" ]] && ! grep -q "op://" "$env_file" 2>/dev/null; then
+    sed -i \
+      -e 's|^LLM_ANTHROPIC_API_KEY=.*|LLM_ANTHROPIC_API_KEY=op://Personal/Honcho/anthropic_key|' \
+      -e 's|^LLM_OPENAI_API_KEY=.*|LLM_OPENAI_API_KEY=op://Personal/Honcho/openai_key|' \
+      "$env_file" && ok "Restored op:// references in .env."
+  fi
 
   echo ""
   ok "Everything stopped. Database data preserved in volume '${PG_VOLUME}'."
