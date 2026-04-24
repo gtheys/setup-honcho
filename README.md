@@ -389,6 +389,108 @@ cat ~/honcho/.honcho-local/logs/deriver.log
 
 ---
 
+## OpenCode plugin setup
+
+The [official `@honcho-ai/opencode-honcho` plugin](https://docs.honcho.dev/v3/guides/integrations/opencode) gives OpenCode persistent memory backed by your local Honcho instance. It handles context injection, per-project session routing, and exposes memory tools directly inside OpenCode.
+
+### Prerequisites
+
+- [Bun](https://bun.sh) — required by the plugin installer (`curl -fsSL https://bun.sh/install | bash`)
+- Honcho running locally (`./deploy.sh up`)
+
+### Step 1 — Install the plugin
+
+```bash
+bunx @honcho-ai/opencode-honcho install
+```
+
+This registers the plugin globally in `~/.config/opencode/opencode.json` and adds the `/honcho:config` command.
+
+### Step 2 — Configure for local Honcho
+
+Start OpenCode and run:
+
+```
+/honcho:setup
+```
+
+When prompted, choose **Self-hosted / local** and enter:
+
+| Setting | Value |
+|---|---|
+| Base URL | `http://localhost:8000` |
+| API key | `local-dev-key` (auth is disabled in the default local setup) |
+| Peer name | your name (e.g. `geert`) |
+
+This writes `~/.honcho/config.json`. You can also create it manually:
+
+```json
+{
+  "apiKey": "local-dev-key",
+  "peerName": "yourname",
+  "baseUrl": "http://localhost:8000",
+  "hosts": {
+    "opencode": {
+      "workspace": "opencode",
+      "aiPeer": "opencode",
+      "recallMode": "hybrid",
+      "sessionStrategy": "per-directory"
+    }
+  }
+}
+```
+
+### Step 3 — Verify
+
+Inside OpenCode run:
+
+```
+/honcho:status
+```
+
+You should see the workspace, peer name, session strategy, and a confirmation that Honcho is reachable.
+
+### How memory works
+
+The plugin uses a **`per-directory` session strategy** by default — each working directory gets its own persistent Honcho session. Every time you open OpenCode in a project directory, it maps to the same session so coding history accumulates across restarts.
+
+Two types of memory are built automatically:
+
+| Memory | Peer | What gets stored |
+|---|---|---|
+| Personal profile | `yourname` | Your preferences, coding style, patterns observed across all sessions |
+| Project memory | per-directory session | What you worked on, decisions made, context specific to that project |
+
+At the start of each session the plugin injects relevant memory from both into the system prompt automatically (`recallMode: hybrid`). You can also query memory explicitly using the built-in tools:
+
+| Tool | What it does |
+|---|---|
+| `honcho_chat` | Ask a natural-language question about what Honcho knows (e.g. "what do you know about this project?") |
+| `honcho_search` | Search raw session messages |
+| `honcho_create_conclusion` | Save a durable fact to memory manually |
+
+### Session strategy options
+
+Change the session strategy via `/honcho:config` or by editing `~/.honcho/config.json`:
+
+| Strategy | Best for |
+|---|---|
+| `per-directory` (default) | Most projects — one session per working directory |
+| `per-repo` | Repos you open from multiple subdirectories |
+| `git-branch` | Branch-specific workflows |
+| `global` | Shared memory across all projects |
+
+### Order of operations
+
+Always start Honcho before opening OpenCode:
+
+```bash
+./deploy.sh up
+# then open OpenCode
+```
+
+---
+
 ## License
 
 This setup script is released under the MIT License. Honcho itself is licensed separately — see the [Honcho repository](https://github.com/plastic-labs/honcho) for details.
