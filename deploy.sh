@@ -204,8 +204,8 @@ resolve_secrets() {
   local resolved_file="${HONCHO_DIR}/.env.resolved"
 
   info "Resolving secrets from 1Password..."
-  op inject --in-file="${env_file}" --out-file="${resolved_file}" \
-    || err "Failed to resolve secrets from 1Password. Is the app running and unlocked?"
+  op inject --in-file="${env_file}" --out-file="${resolved_file}" ||
+    err "Failed to resolve secrets from 1Password. Is the app running and unlocked?"
 
   # Replace the .env symlink/file so load_dotenv picks up resolved values
   cp "${resolved_file}" "${env_file}"
@@ -345,8 +345,8 @@ cmd_down() {
   local env_file="${HONCHO_DIR}/.env"
   if [[ -f "$env_file" ]] && ! grep -q "op://" "$env_file" 2>/dev/null; then
     sed -i \
-      -e 's|^LLM_ANTHROPIC_API_KEY=.*|LLM_ANTHROPIC_API_KEY=op://Personal/Honcho/anthropic_key|' \
-      -e 's|^LLM_OPENAI_API_KEY=.*|LLM_OPENAI_API_KEY=op://Personal/Honcho/openai_key|' \
+      -e 's|^LLM_ANTHROPIC_API_KEY=.*|LLM_ANTHROPIC_API_KEY=op://Personal/llm-keys/anthropic_key|' \
+      -e 's|^LLM_OPENAI_API_KEY=.*|LLM_OPENAI_API_KEY=op://Personal/llm-keys/openai_key|' \
       "$env_file" && ok "Restored op:// references in .env."
   fi
 
